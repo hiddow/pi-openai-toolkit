@@ -19,11 +19,15 @@ function incrementalBody(body, continuation) {
   return { ...body, previous_response_id: continuation.id, input: delta };
 }
 
-/** Bridge WS events to Pi's SDK parser; auto may fall back only before sending. */
-function createWebSocketTransport(WebSocket) {
+/** Bridge WS events to Pi's SDK parser; never replay a sent request inside fetch. */
+function createWebSocketTransport(WebSocket, { now = Date.now } = {}) {
   const connections = new Set();
+  const recovery = new Map();
   const encoder = new TextEncoder();
   const idleLifetimeMs = 60_000;
+  const maxConnectionAgeMs = 55 * 60_000;
+  let requestSequence = 0;
+  let connectionSequence = 0;
 
   function remove(entry) {
     clearTimeout(entry.expiry);
@@ -32,7 +36,7 @@ function createWebSocketTransport(WebSocket) {
   }
 
   function fetchFor(options = {}) {
-    const websocketFetch = async (input, init) => {
+    const websocketFetch = async (input, init, state, report, route) => {
       const request = new Request(input, init);
       request.signal.throwIfAborted();
       const url = new URL(request.url);
@@ -48,8 +52,10 @@ function createWebSocketTransport(WebSocket) {
       for (const name of ['content-length', 'content-type', 'accept-encoding', 'connection', 'host']) delete headers[name];
       headers.accept = 'application/json';
       // Hash authentication and routing headers rather than keeping keys in map keys.
-      const identity = createHash('sha256').update(JSON.stringify(headers)).digest('hex');
-      const key = options.sessionId ? `${options.sessionId}:${url}:${identity}` : undefined;
+      const key = options.reuseConnection === false ? undefined : state.routeKey;
+      for (const candidate of connections) {
+        if (!candidate.busy && now() - candidate.createdAt >= maxConnectionAgeMs) remove(candidate);
+      }
       let entry = key && [...connections].find(item => item.key === key && !item.busy && item.socket.readyState === WebSocket.OPEN);
       const reused = Boolean(entry);
       const useCachedContext = options.cachedContext !== false && (options.transport === 'auto' || options.transport === 'websocket-cached');
@@ -58,7 +64,7 @@ function createWebSocketTransport(WebSocket) {
       let callIds = wireBody !== payload ? new Map(continuation.callIds) : new Map();
       if (!entry) {
         entry = {
-          key, busy: true, expiry: undefined,
+          key, busy: true, expiry: undefined, createdAt: now(), id: ++connectionSequence,
           socket: new WebSocket(url, {
             headers, followRedirects: false,
             handshakeTimeout: options.websocketConnectTimeoutMs ?? 15_000,
@@ -73,6 +79,10 @@ function createWebSocketTransport(WebSocket) {
       entry.continuation = undefined;
       clearTimeout(entry.expiry);
       const socket = entry.socket;
+      report('connecting', {
+        connectionId: entry.id, reused, context: wireBody === payload ? 'full' : 'delta',
+        inputItems: wireBody.input?.length ?? 0, fullInputItems: payload.input?.length ?? 0,
+      });
       return new Promise((resolve, reject) => {
         let responded = false;
         let finished = false;
@@ -82,7 +92,7 @@ function createWebSocketTransport(WebSocket) {
         let recoveredContinuation = false;
         const stream = new ReadableStream({
           start(value) { controller = value; },
-          cancel() { finish(new Error('WebSocket response consumption cancelled.')); },
+          cancel() { finish(new Error('WebSocket response consumption cancelled.'), false, 'cancelled'); },
         });
         function cleanup() {
           clearTimeout(timer);
@@ -93,11 +103,21 @@ function createWebSocketTransport(WebSocket) {
           socket.off('close', closed);
           socket.off('unexpected-response', unexpected);
         }
-        function finish(failure, reusable = true) {
+        function finish(failure, reusable = true, errorKind = 'protocol', details = {}) {
           if (finished) return;
           finished = true;
           cleanup();
           if (failure) {
+            report(errorKind === 'cancelled' ? 'cancelled' : 'failed', { errorKind, ...details });
+            if (['connection', 'closed', 'idle_timeout'].includes(errorKind) && !request.signal.aborted && route) {
+              route.failures++;
+              const threshold = options.fallbackAfterFailures ?? 2;
+              if (options.transport === 'auto' && threshold > 0 && route.failures >= threshold) {
+                route.sse = true;
+                for (const candidate of connections) if (candidate.key === key && !candidate.busy) remove(candidate);
+                report('fallback_pending', { failures: route.failures });
+              }
+            }
             // Before fetch resolves, reject only; do not leave an unobserved errored stream.
             if (responded) controller.error(failure);
             else reject(failure);
@@ -105,8 +125,10 @@ function createWebSocketTransport(WebSocket) {
           } else {
             controller.close();
             entry.busy = false;
-            if (reusable && key && socket.readyState === WebSocket.OPEN) {
-              entry.expiry = setTimeout(() => remove(entry), idleLifetimeMs);
+            if (route) route.failures = 0;
+            report(reusable ? 'completed' : 'failed', reusable ? {} : { errorKind: 'server' });
+            if (reusable && key && !route?.sse && socket.readyState === WebSocket.OPEN && now() - entry.createdAt < maxConnectionAgeMs) {
+              entry.expiry = setTimeout(() => remove(entry), Math.min(idleLifetimeMs, maxConnectionAgeMs - (now() - entry.createdAt)));
               entry.expiry.unref();
             } else remove(entry);
           }
@@ -114,11 +136,18 @@ function createWebSocketTransport(WebSocket) {
         function touch() {
           clearTimeout(timer);
           const timeoutMs = options.timeoutMs ?? 300_000;
-          if (timeoutMs > 0) timer = setTimeout(() => finish(new Error('Toolkit WebSocket response idle timeout.')), timeoutMs);
+          if (timeoutMs > 0) timer = setTimeout(() => finish(new Error('network error: Toolkit WebSocket response idle timeout.'), false, 'idle_timeout'), timeoutMs);
         }
-        function abort() { finish(request.signal.reason || new DOMException('Aborted', 'AbortError')); }
-        function error() { finish(new Error('Toolkit WebSocket connection failed.')); }
-        function closed(code) { finish(new Error(`Toolkit WebSocket closed before response completion (code ${code}).`)); }
+        function abort() { finish(request.signal.reason || new DOMException('Aborted', 'AbortError'), false, 'cancelled'); }
+        function error(cause) {
+          // Never expose the underlying message, URL, headers or server body.
+          const configurationCodes = ['CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID'];
+          const protocolCodes = ['WS_ERR_INVALID_OPCODE', 'WS_ERR_INVALID_UTF8', 'WS_ERR_INVALID_CLOSE_CODE', 'WS_ERR_UNEXPECTED_RSV_1', 'WS_ERR_UNEXPECTED_RSV_2_3', 'WS_ERR_EXPECTED_MASK', 'WS_ERR_UNEXPECTED_MASK', 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH'];
+          const errorKind = configurationCodes.includes(cause?.code) ? 'configuration' : protocolCodes.includes(cause?.code) ? 'protocol' : 'connection';
+          const errorCode = [...configurationCodes, ...protocolCodes, 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ENETUNREACH', 'EHOSTUNREACH'].includes(cause?.code) ? cause.code : undefined;
+          finish(new Error(`${errorKind === 'connection' ? 'network error: ' : ''}Toolkit WebSocket connection failed.${errorCode ? ` (${errorCode})` : ''}`), false, errorKind, errorCode ? { errorCode } : {});
+        }
+        function closed(code) { finish(new Error(`network error: Toolkit WebSocket closed before response completion (code ${code}).`), false, 'closed', { closeCode: code }); }
         function unexpected(_request, response) {
           // Preserve HTTP status and retry headers without copying/logging server bodies.
           responded = true;
@@ -126,6 +155,8 @@ function createWebSocketTransport(WebSocket) {
           cleanup();
           response.resume();
           controller.close();
+          if (route) route.failures = 0;
+          report('failed', { errorKind: 'http', httpStatus: response.statusCode });
           const responseHeaders = new Headers();
           for (const [name, value] of Object.entries(response.headers)) {
             if (typeof value === 'string') responseHeaders.set(name, value);
@@ -157,7 +188,10 @@ function createWebSocketTransport(WebSocket) {
           send();
         }
         function send() {
-          socket.send(JSON.stringify(wireBody), failure => { if (failure) error(); });
+          if (finished || request.signal.aborted) return;
+          report('waiting', { requestSent: true });
+          try { socket.send(JSON.stringify(wireBody), failure => { if (failure) error(failure); }); }
+          catch (failure) { error(failure); }
         }
         function message(data) {
           if (finished) return;
@@ -166,11 +200,14 @@ function createWebSocketTransport(WebSocket) {
           try { event = JSON.parse(data.toString()); }
           catch { return finish(new Error('Invalid JSON in Toolkit WebSocket response.')); }
           if (!event || typeof event.type !== 'string') return finish(new Error('Invalid Toolkit WebSocket event.'));
+          const progress = /^response\.(output_text|reasoning.*|function_call_arguments|custom_tool_call_input)\.delta$/.test(event.type) && typeof event.delta === 'string' && event.delta.length > 0;
+          report('streaming', { lastEventAt: now(), ...(progress ? { lastProgressAt: now() } : {}) });
           const code = event.code ?? event.error?.code;
           if (event.type === 'error' && code === 'previous_response_not_found' && wireBody !== payload && !responseStarted && !recoveredContinuation) {
             // The server rejected the continuation before starting a response.
             // Replay the complete request once on WS; never retry quota or other errors.
             recoveredContinuation = true;
+            report('streaming', { context: 'full', inputItems: payload.input?.length ?? 0 });
             wireBody = payload;
             callIds = new Map();
             send();
@@ -200,23 +237,53 @@ function createWebSocketTransport(WebSocket) {
     const httpFetch = options.fetch ?? globalThis.fetch;
     return async (input, init) => {
       const request = new Request(input, init);
-      if (options.transport === 'sse') return httpFetch(request);
+      request.signal.throwIfAborted();
+      const body = JSON.parse(await request.clone().text());
+      const identityHeaders = new Headers(request.headers);
+      for (const name of ['x-client-request-id', 'content-length', 'content-type', 'accept-encoding', 'connection', 'host']) identityHeaders.delete(name);
+      const routeKey = options.sessionId ? createHash('sha256').update(JSON.stringify([
+        options.sessionId, request.url, body.model, [...identityHeaders.entries()],
+      ])).digest('hex') : undefined;
+      let route = routeKey && recovery.get(routeKey);
+      if (routeKey && !route) { route = { failures: 0, sse: false }; recovery.set(routeKey, route); }
+      const state = { requestId: ++requestSequence, routeKey, startedAt: now(), transport: 'websocket', requestSent: false };
+      function report(phase, patch = {}) {
+        Object.assign(state, patch, { phase });
+        // This private key never leaves the transport, even in optional observers.
+        const { routeKey: _key, ...publicState } = state;
+        try { options.onTransportState?.({ ...publicState }); } catch { /* UI must not affect transport. */ }
+      }
+      async function http(request, reason) {
+        request.signal.throwIfAborted();
+        report('connecting', { transport: 'sse', reason, requestSent: true, lastEventAt: undefined, lastProgressAt: undefined,
+          errorKind: undefined, errorCode: undefined, closeCode: undefined, httpStatus: undefined,
+          connectionId: undefined, reused: false, context: 'full', inputItems: body.input?.length ?? 0, fullInputItems: body.input?.length ?? 0 });
+        try {
+          const response = await httpFetch(request);
+          report(response.ok ? 'waiting' : 'failed', { httpStatus: response.status, ...(response.ok ? {} : { errorKind: 'http' }) });
+          return response;
+        } catch (failure) {
+          report(request.signal.aborted ? 'cancelled' : 'failed', { errorKind: request.signal.aborted ? 'cancelled' : 'http' });
+          throw failure;
+        }
+      }
+      if (options.transport === 'sse') return http(request, 'explicit');
+      if (options.transport === 'auto' && route?.sse) return http(request, 'sticky_fallback');
       const fallback = options.transport === 'auto' ? request.clone() : undefined;
       let response;
       try {
-        response = await websocketFetch(request);
+        response = await websocketFetch(request, undefined, state, report, route);
       } catch (failure) {
-        // websocketFetch rejects only before the handshake resolves. After opening,
-        // failures go to the reader and must never replay a possibly billed request.
-        if (!fallback || request.signal.aborted || !/WebSocket (connection failed|closed before response completion)/.test(failure.message)) throw failure;
-        return httpFetch(fallback);
+        // After opening, errors only reach the reader. Pi owns the next logical attempt.
+        if (!fallback || request.signal.aborted || !failure.message.startsWith('network error:') || !/WebSocket (connection failed|closed before response completion)/.test(failure.message)) throw failure;
+        return http(fallback, 'handshake_network');
       }
       if (fallback && [400, 404, 405, 426, 501].includes(response.status)) {
         await response.body?.cancel();
         request.signal.throwIfAborted();
-        return httpFetch(fallback);
+        if (route && (options.fallbackAfterFailures ?? 2) > 0) route.sse = true;
+        return http(fallback, 'unsupported_upgrade');
       }
-      // Authentication, quota and server errors remain visible to Pi's retry policy.
       return response;
     };
   }
@@ -249,6 +316,6 @@ function createWebSocketTransport(WebSocket) {
       }
     }
   }
-  return { fetchFor, rememberResponse, close() { for (const entry of [...connections]) remove(entry); } };
+  return { fetchFor, rememberResponse, close() { for (const entry of [...connections]) remove(entry); recovery.clear(); } };
 }
 module.exports = { createWebSocketTransport };

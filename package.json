@@ -1,11 +1,11 @@
 {
   "name": "pi-openai-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
-  "description": "Responses WebSocket transport and imagegen for Pi; independently maintained lightweight toolkit",
+  "description": "Responses WebSocket transport, remote compaction and imagegen for Pi; independently maintained lightweight toolkit",
   "license": "MIT",
   "repository": {
     "type": "git",

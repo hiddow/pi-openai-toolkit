@@ -4,7 +4,15 @@
     "responsesWebSocket": {
       "enabled": false,
       "providers": [],
-      "cachedContext": true
+      "cachedContext": true,
+      "fallbackAfterFailures": 2,
+      "reuseConnection": true,
+      "slowResponseWarningMs": 30000
+    },
+    "remoteCompaction": {
+      "enabled": false,
+      "models": [],
+      "timeoutMs": 120000
     },
     "imageGeneration": {
       "enabled": false,

@@ -77,7 +77,13 @@ test('WebSocket requires a provider and cached context can be disabled independe
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: true } } }), /nonempty providers/);
   const config = parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: true, providers: ['fixture'], cachedContext: false } } });
   assert.equal(config.responsesWebSocket.cachedContext, false);
+  assert.equal(config.responsesWebSocket.fallbackAfterFailures, 2);
+  assert.equal(config.responsesWebSocket.reuseConnection, true);
+  assert.equal(config.responsesWebSocket.slowResponseWarningMs, 30_000);
   assert.equal(config.imageGeneration.enabled, false);
+  for (const fallbackAfterFailures of [-1, 11, 1.5]) assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { fallbackAfterFailures } } }), /fallbackAfterFailures/);
+  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { reuseConnection: 'false' } } }), /boolean/);
+  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { slowResponseWarningMs: 0 } } }), /slowResponseWarningMs/);
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { cachedContext: 'false' } } }), /boolean/);
 });
 

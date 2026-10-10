@@ -23,7 +23,7 @@ function fixture(options = {}) {
     event(value) { this.emit('message', Buffer.from(JSON.stringify(value))); }
     terminate() { this.readyState = 3; queueMicrotask(() => this.emit('close', 1006)); }
   }
-  const transport = createWebSocketTransport(Socket);
+  const transport = createWebSocketTransport(Socket, options.runtime);
   const fetch = transport.fetchFor({ sessionId: 'test', ...options });
   const request = (signal, patch = {}) => fetch('https://example.test/v1/responses', {
     method: 'POST', headers: { Authorization: 'Bearer test-fixture', 'content-type': 'application/json' },
@@ -369,4 +369,125 @@ test('cachedContext false keeps full-history WS even when Pi requests auto cachi
   assert.deepEqual(socket.sent[1].input, full);
   socket.event(completed);
   await second.text();
+});
+
+async function disconnect(f, patch = {}) {
+  const response = await f.request(undefined, patch);
+  f.Socket.instances.at(-1).terminate();
+  await assert.rejects(response.text(), /network error:.*closed before response completion/);
+}
+
+test('two WS disconnects switch only the next auto attempt to SSE and stay there', async t => {
+  const states = [];
+  const httpBodies = [];
+  const f = fixture({ transport: 'auto', onTransportState: state => states.push(state), fetch: async request => {
+    httpBodies.push(await request.json()); return new Response('HTTP OK');
+  } }); t.after(() => f.transport.close());
+  await disconnect(f, { input: [user('private prompt')] });
+  await disconnect(f, { input: [user('private prompt')] });
+  assert.equal(httpBodies.length, 0, 'never replay a sent request within fetch');
+  assert.ok(states.some(state => state.phase === 'fallback_pending'));
+  const input = [user('full next context')];
+  assert.equal(await (await f.request(undefined, { input })).text(), 'HTTP OK');
+  assert.equal(await (await f.request()).text(), 'HTTP OK');
+  assert.equal(f.Socket.instances.length, 2);
+  assert.equal(httpBodies[0].stream, true);
+  assert.deepEqual(httpBodies[0].input, input);
+  assert.equal(httpBodies[0].previous_response_id, undefined);
+  assert.doesNotMatch(JSON.stringify(states), /private prompt|Bearer|example\.test|routeKey/);
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(f.request(cancelled.signal), { name: 'AbortError' });
+  assert.equal(httpBodies.length, 2, 'cancellation never starts a sticky SSE attempt');
+  f.transport.close();
+  const fresh = await f.request();
+  f.Socket.instances.at(-1).event(completed); await fresh.text();
+  assert.equal(f.Socket.instances.length, 3, 'session teardown clears the breaker');
+});
+
+test('WS success resets failures; explicit WS and disabled sticky fallback remain strict', async t => {
+  for (const options of [{ transport: 'websocket' }, { transport: 'auto', fallbackAfterFailures: 0 }]) {
+    const f = fixture({ ...options, fetch: async () => assert.fail('unexpected SSE') });
+    t.after(() => f.transport.close());
+    await disconnect(f); await disconnect(f); await disconnect(f);
+    assert.equal(f.Socket.instances.length, 3);
+  }
+  const f = fixture({ transport: 'auto', fetch: async () => assert.fail('unexpected SSE') });
+  t.after(() => f.transport.close());
+  await disconnect(f);
+  const success = await f.request(); f.Socket.instances.at(-1).event(completed); await success.text();
+  await disconnect(f);
+  const next = await f.request(); f.Socket.instances.at(-1).event(completed); await next.text();
+});
+
+test('cancellation and server errors do not open the breaker or send HTTP requests', async t => {
+  const f = fixture({ transport: 'auto', fetch: async () => assert.fail('unexpected SSE') });
+  t.after(() => f.transport.close());
+  for (let i = 0; i < 2; i++) {
+    const abort = new AbortController();
+    const response = await f.request(abort.signal); abort.abort();
+    await assert.rejects(response.text(), { name: 'AbortError' });
+  }
+  for (let i = 0; i < 2; i++) {
+    const response = await f.request();
+    f.Socket.instances.at(-1).event({ type: 'error', error: { code: 'insufficient_quota' } });
+    assert.match(await response.text(), /insufficient_quota/);
+  }
+  const response = await f.request(); f.Socket.instances.at(-1).event(completed); await response.text();
+  const cancelled = new AbortController(); cancelled.abort();
+  await assert.rejects(f.request(cancelled.signal), { name: 'AbortError' });
+});
+
+test('sticky fallback is isolated by model, session and credentials', async t => {
+  const f = fixture({ transport: 'auto', fetch: async () => new Response('HTTP') });
+  t.after(() => f.transport.close());
+  await disconnect(f); await disconnect(f);
+  const otherModel = await f.request(undefined, { model: 'other' });
+  f.Socket.instances.at(-1).event(completed); await otherModel.text();
+  for (const options of [{ sessionId: 'other' }, { sessionId: 'test', headers: { authorization: 'Bearer other' } }]) {
+    const fetch = f.transport.fetchFor({ ...options, transport: 'auto' });
+    const response = await fetch('https://example.test/v1/responses', { method: 'POST', headers: options.headers ?? { authorization: 'Bearer test-fixture', 'content-type': 'application/json' }, body: JSON.stringify({ model: 'fixture', input: [], stream: true, store: false }) });
+    f.Socket.instances.at(-1).event(completed); await response.text();
+  }
+  assert.equal(f.Socket.instances.length, 5);
+});
+
+test('maximum connection age and no-reuse diagnostics open full-history sockets', async t => {
+  let clock = 0;
+  const f = fixture({ transport: 'auto', runtime: { now: () => clock } }); t.after(() => f.transport.close());
+  const first = await f.request(undefined, { input: [user('one')] });
+  completeCached(f, f.Socket.instances[0], 'resp_1', [assistant('a')]); await first.text();
+  clock = 55 * 60_000;
+  const second = await f.request(undefined, { input: [user('one'), assistant('a'), user('two')] });
+  assert.equal(f.Socket.instances.length, 2);
+  assert.equal(f.Socket.instances[1].sent[0].previous_response_id, undefined);
+  f.Socket.instances[1].event(completed); await second.text();
+  const fresh = fixture({ transport: 'auto', reuseConnection: false }); t.after(() => fresh.transport.close());
+  for (let i = 0; i < 2; i++) { const response = await fresh.request(); fresh.Socket.instances.at(-1).event(completed); await response.text(); }
+  assert.equal(fresh.Socket.instances.length, 2);
+});
+
+test('connection errors are retryable by Pi and retain only allowlisted error codes', async t => {
+  const { isRetryableAssistantError } = await import('@earendil-works/pi-ai/compat');
+  const f = fixture({ transport: 'websocket', deferOpen: true }); t.after(() => f.transport.close());
+  const pending = f.request();
+  await new Promise(resolve => setImmediate(resolve));
+  f.Socket.instances[0].emit('error', Object.assign(new Error('private credential in source error'), { code: 'ECONNRESET' }));
+  const error = await pending.catch(error => error);
+  assert.equal(isRetryableAssistantError({ stopReason: 'error', errorMessage: error.message }), true);
+  assert.match(error.message, /ECONNRESET/);
+  assert.doesNotMatch(error.message, /private credential/);
+});
+
+test('certificate and protocol errors are not classified as temporary connection failures', async t => {
+  const { isRetryableAssistantError } = await import('@earendil-works/pi-ai/compat');
+  for (const code of ['ERR_TLS_CERT_ALTNAME_INVALID', 'WS_ERR_INVALID_OPCODE']) {
+    const f = fixture({ transport: 'auto', deferOpen: true, fetch: async () => assert.fail('unexpected SSE') });
+    t.after(() => f.transport.close());
+    const pending = f.request(); await new Promise(resolve => setImmediate(resolve));
+    f.Socket.instances[0].emit('error', Object.assign(new Error('private server details'), { code }));
+    const error = await pending.catch(error => error);
+    assert.equal(isRetryableAssistantError({ stopReason: 'error', errorMessage: error.message }), false);
+    assert.match(error.message, new RegExp(code));
+    assert.doesNotMatch(error.message, /private server details|network error:/);
+  }
 });

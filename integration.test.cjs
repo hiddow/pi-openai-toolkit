@@ -45,11 +45,13 @@ test('Pi loads/reloads Toolkit, preserves provider metadata, streams cached WS a
     await new Promise(resolve => server.close(resolve));
   });
   let connections = 0;
+  let disconnectResponses = false;
   const requests = [];
   server.on('connection', socket => {
     connections++;
     socket.on('message', data => {
       requests.push(JSON.parse(data.toString()));
+      if (disconnectResponses) { socket.terminate(); return; }
       const id = `resp_${requests.length}`;
       const item = { type: 'message', id: `msg_${requests.length}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'OK', annotations: [] }] };
       for (const event of [
@@ -77,6 +79,42 @@ test('Pi loads/reloads Toolkit, preserves provider metadata, streams cached WS a
   assert.equal(requests[1].input.length, 1);
   assert.equal(payloadHooks, 2);
   assert.equal(headers[1]['x-pi-websocket-context'], 'delta');
+
+  // Exercise Pi's actual SDK parser and extension lifecycle on interrupted WS streams.
+  const statuses = [];
+  const notifications = [];
+  const diagnostics = [];
+  loaded.runtime.appendEntry = (customType, data) => diagnostics.push({ customType, data });
+  const ctx = { mode: 'tui', hasUI: true, ui: { setStatus: (_key, text) => statuses.push(text), notify: text => notifications.push(text) } };
+  for (const handler of extension.handlers.get('before_agent_start') ?? []) await handler({}, ctx);
+  disconnectResponses = true;
+  const { isRetryableAssistantError } = await import('@earendil-works/pi-ai/compat');
+  for (let i = 0; i < 2; i++) {
+    const failed = await registration.config.streamSimple(model, { messages: [user('resume')] }, options).result();
+    assert.equal(failed.stopReason, 'error');
+    assert.equal(isRetryableAssistantError(failed), true);
+  }
+  const websocketAttempts = requests.length;
+  let httpAttempts = 0;
+  const sseOptions = { ...options, fetch: async request => {
+    httpAttempts++;
+    const body = await request.json();
+    assert.equal(body.stream, true);
+    assert.equal(body.previous_response_id, undefined);
+    return new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { id: 'http_recovered', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } } })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  } };
+  for (let i = 0; i < 2; i++) {
+    const recovered = await registration.config.streamSimple(model, { messages: [user('resume')] }, sseOptions).result();
+    assert.equal(recovered.stopReason, 'stop');
+  }
+  assert.equal(httpAttempts, 2);
+  assert.equal(requests.length, websocketAttempts);
+  for (const handler of extension.handlers.get('agent_settled') ?? []) await handler({ aborted: false }, ctx);
+  assert.equal(statuses.at(-1), undefined);
+  assert.equal(notifications.length, 1);
+  assert.equal(diagnostics[0].customType, 'pi-openai-transport');
+  assert.equal(diagnostics[0].data.outcome, 'stop');
+  assert.doesNotMatch(JSON.stringify(diagnostics), /integration-fixture-only|Bearer|127\.0\.0\.1/);
 
   const previousFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = previousFetch; });
