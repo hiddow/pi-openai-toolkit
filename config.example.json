@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "defaults": {
+    "responsesWebSocket": {
+      "enabled": false,
+      "providers": [],
+      "cachedContext": true
+    },
+    "imageGeneration": {
+      "enabled": false,
+      "defaultModel": "gpt-image-1.5",
+      "allowedModels": [
+        "gpt-image-1.5",
+        "gpt-image-2"
+      ],
+      "timeoutMs": 300000,
+      "artifactDirectory": ".pi/generated-images"
+    }
+  }
+}

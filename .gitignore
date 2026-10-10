@@ -1,0 +1,14 @@
+node_modules/
+config.json
+pi-openai-toolkit.json
+auth.json
+models.json
+web-search.json
+.pi/
+.env
+.env.*
+!.env.example
+*.log
+*.tgz
+coverage/
+.DS_Store

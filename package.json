@@ -1,0 +1,60 @@
+{
+  "name": "pi-openai-toolkit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Responses WebSocket transport and imagegen for Pi; independently maintained lightweight toolkit",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hiddow/pi-openai-toolkit.git"
+  },
+  "homepage": "https://github.com/hiddow/pi-openai-toolkit#readme",
+  "bugs": {
+    "url": "https://github.com/hiddow/pi-openai-toolkit/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "openai",
+    "websocket",
+    "image-generation"
+  ],
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "*.cjs",
+    "!*.test.cjs",
+    "config.example.json",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test *.test.cjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@types/node": "^22.19.19",
+    "@types/ws": "^8.18.1",
+    "typescript": "~5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
