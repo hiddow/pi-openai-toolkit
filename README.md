@@ -13,7 +13,7 @@
 
 ## 安装和更新
 
-npm 包名为 `pi-openai-bridge`，不使用 scope。安装和更新：
+npm 包名为 `pi-openai-bridge`，不使用 scope。**npm 发布尚未完成，以下 npm 安装命令要待上架后才能使用。** 发布后安装和更新：
 
 ```bash
 pi install npm:pi-openai-bridge
