@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 (not yet published to npm)
+## 0.1.1
 
 - Add the unscoped npm package `pi-openai-bridge` with public npm registry settings and pre-publish checks.
 - Preserve the existing configuration path, environment variable, command and tool names.
