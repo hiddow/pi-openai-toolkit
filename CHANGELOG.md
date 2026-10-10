@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Add the unscoped npm package `pi-openai-bridge` with public npm registry settings and pre-publish checks.
+- Preserve the existing configuration path, environment variable, command and tool names.
+- Keep the GitHub source repository and the published v0.1.0 Git tag unchanged.
+
 ## 0.1.0
 
 - Responses WebSocket with session reuse, incremental replay and pre-send SSE fallback.

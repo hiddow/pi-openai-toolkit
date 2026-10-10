@@ -1,4 +1,4 @@
-# pi-openai-toolkit
+# pi-openai-bridge
 
 ## 功能和兼容范围
 
@@ -13,20 +13,22 @@
 
 ## 安装和更新
 
-项目仓库：[hiddow/pi-openai-toolkit](https://github.com/hiddow/pi-openai-toolkit)。指定标签可以固定版本：
+npm 包名为 `pi-openai-bridge`，不使用 scope。安装和更新：
 
 ```bash
-pi install git:github.com/hiddow/pi-openai-toolkit@v0.1.0
-```
-
-如果希望跟随仓库默认分支更新，安装时不要指定标签：
-
-```bash
-pi install git:github.com/hiddow/pi-openai-toolkit
+pi install npm:pi-openai-bridge
 pi update --extensions
 ```
 
-指定标签或提交的安装保持固定版本。升级到另一个标签时，重新安装对应来源。
+需要固定版本时，可以使用 `npm:pi-openai-bridge@0.1.1`。未指定版本的安装随包更新；固定版本保持不变。
+
+源码仍由 [hiddow/pi-openai-toolkit](https://github.com/hiddow/pi-openai-toolkit) 管理。也可以通过 Git 安装：
+
+```bash
+pi install git:github.com/hiddow/pi-openai-toolkit
+```
+
+Git 标签和提交同样可以固定版本。此前发布的 `v0.1.0` 标签保留原来的包名，不会重写。
 
 本地开发也可以加载整个包：
 
@@ -35,7 +37,7 @@ npm ci --ignore-scripts
 pi --no-extensions -e .
 ```
 
-不要同时加载本项目和另一套注册 `imagegen` 或 `/toolkit-config` 的插件，包括上游同名项目。
+不要同时加载本项目的 npm、Git 和本地副本，也不要同时加载其他注册 `imagegen` 或 `/toolkit-config` 的插件。
 
 ## 外部配置
 
@@ -45,7 +47,9 @@ pi --no-extensions -e .
 ~/.pi/agent/pi-openai-toolkit.json
 ```
 
-设置了 `PI_CODING_AGENT_DIR` 时，插件使用该 agent directory。Git 安装位置与配置位置分开，更新插件不会覆盖个人配置。
+包名更改不会改动配置文件名、`PI_OPENAI_TOOLKIT_CONFIG`、`imagegen` 或 `/toolkit-config`，已有配置可以继续使用。
+
+设置了 `PI_CODING_AGENT_DIR` 时，插件使用该 agent directory。npm 和 Git 安装位置都与配置位置分开，更新插件不会覆盖个人配置。
 
 从源码目录复制配置示例：
 
@@ -119,7 +123,7 @@ mv -n ~/.pi/agent/extensions/pi-openai-toolkit/config.json ~/.pi/agent/pi-openai
 
 省略 `cachedContext` 时默认开启。旧路径兼容只用于读取，不会自动搬动或重写文件。
 
-切换到 Git 安装时，再把旧本地插件目录备份到 `extensions` 之外，避免重复加载。个人配置保留在 agent 根目录，无需创建配置专用的扩展目录。你的 provider ID 只放在个人配置中，不需要改源码。
+切换到 npm 或 Git 安装时，再把旧本地插件目录备份到 `extensions` 之外，避免重复加载。个人配置保留在 agent 根目录，无需创建配置专用的扩展目录。你的 provider ID 只放在个人配置中，不需要改源码。
 
 ## WebSocket
 
@@ -191,6 +195,15 @@ npm ci --ignore-scripts
 npm run check
 npm pack --dry-run
 ```
+
+维护者发布前需要登录 npm，并确认有权发布该名称。`npm publish` 会先执行检查：
+
+```bash
+npm login --registry=https://registry.npmjs.org
+npm publish --access public
+```
+
+不要把 npm token、验证码或账户配置提交到仓库。
 
 `check` 包含 TypeScript 检查和离线测试。集成测试使用开发依赖中的 Pi、本地 WebSocket 服务及模拟图片响应，不读取个人凭证，不调用收费服务。GitHub Actions 配置了 Node.js 22 和 24；远端 CI 需要推送仓库后运行。
 

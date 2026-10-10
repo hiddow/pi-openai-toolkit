@@ -1,7 +1,10 @@
 {
-  "name": "pi-openai-toolkit",
-  "version": "0.1.0",
-  "private": true,
+  "name": "pi-openai-bridge",
+  "version": "0.1.1",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "description": "Responses WebSocket transport and imagegen for Pi; independently maintained lightweight toolkit",
   "license": "MIT",
   "repository": {
@@ -38,7 +41,8 @@
   "scripts": {
     "test": "node --test *.test.cjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check"
   },
   "dependencies": {
     "ws": "^8.21.0"
