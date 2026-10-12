@@ -1,12 +1,8 @@
-import WebSocket from "ws";
 import { Type } from "@earendil-works/pi-ai";
 import { openAIResponsesApi, getCurrentTools, calculateCost } from "@earendil-works/pi-ai/compat";
-import { convertToLlm, defineTool, getAgentDir, getPackageDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, defineTool, getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfigFile, resolveConfigPath } from "./config.cjs";
-import { loadReplayHelpers } from "./pi-runtime.cjs";
 import { generateImages } from "./image-generation.cjs";
-import { createWebSocketTransport } from "./transport.cjs";
-import { createTransportStatus } from "./transport-status.cjs";
 import { createCompactionController, checkpointDetails } from "./remote-compaction.cjs";
 
 const artifactSchema = Type.Object({ path: Type.String(), mimeType: Type.String(), bytes: Type.Number() });
@@ -21,12 +17,6 @@ export default async function (pi: ExtensionAPI) {
 	const configPath = resolveConfigPath(agentDirectory);
 	const requiredConfig = process.env.PI_OPENAI_TOOLKIT_CONFIG !== undefined;
 	const config = loadConfigFile(configPath, requiredConfig);
-	const transportStatus = createTransportStatus({
-		slowResponseWarningMs: config.responsesWebSocket.slowResponseWarningMs,
-		onDiagnostic: (data: unknown) => pi.appendEntry("pi-openai-transport", data),
-	});
-	pi.on("before_agent_start", (_event, ctx) => { transportStatus.start(ctx); });
-	pi.on("agent_settled", (event) => { transportStatus.settle(event.aborted); });
 
 	pi.registerCommand("toolkit-config", {
 		description: "Show or validate Toolkit configuration (reload after edits)",
@@ -98,7 +88,7 @@ export default async function (pi: ExtensionAPI) {
 			return usage;
 		},
 	});
-	pi.on("context_with_system", (event, ctx) => { compaction.captureHead(event.messages, ctx); transportStatus.bind(ctx); });
+	pi.on("context_with_system", (event, ctx) => { compaction.captureHead(event.messages, ctx); });
 	pi.on("session_before_compact", (event, ctx) => compaction.compact(event, ctx));
 	pi.on("session_before_tree", (event, ctx) => {
 		if (!event.preparation.userWantsSummary) return;
@@ -125,38 +115,14 @@ export default async function (pi: ExtensionAPI) {
 	});
 	pi.on("session_start", () => { compaction.reset(); });
 	pi.on("session_tree", () => { compaction.reset(); });
-	// Pi exposes the host package directory in both bundled CLI and SDK loads.
-	const wsEnabled = config.responsesWebSocket.enabled;
-	const wsProviders: string[] = config.responsesWebSocket.providers;
-	const replay = wsEnabled && config.responsesWebSocket.cachedContext
-		? await loadReplayHelpers(getPackageDir())
-		: undefined;
-	const transport = wsEnabled ? createWebSocketTransport(WebSocket) : undefined;
-	const providers = new Set<string>([
-		...(wsEnabled ? wsProviders : []),
-		...config.remoteCompaction.models.map((key: string) => key.slice(0, key.indexOf("/"))),
-	]);
+	// Keep the replay guard for configured checkpoint providers without taking
+	// ownership of their transport or changing unrelated provider registrations.
+	const providers = new Set<string>(config.remoteCompaction.models.map((key: string) => key.slice(0, key.indexOf("/"))));
 	for (const provider of providers) pi.registerProvider(provider, {
 		api: "openai-responses",
 		streamSimple(model, context, options) {
-			const api = openAIResponsesApi();
-			const cacheOwner = Symbol();
-			const statusGeneration = transportStatus.generation();
-			const useTransport = wsEnabled && wsProviders.includes(provider);
-			const useWebSocket = useTransport && options?.transport !== "sse";
-			const stream = api.streamSimple(model, context, {
+			return openAIResponsesApi().streamSimple(model, context, {
 				...options,
-				...(useTransport ? { fetch: transport!.fetchFor({
-					...options, cacheOwner, cachedContext: config.responsesWebSocket.cachedContext,
-					fallbackAfterFailures: config.responsesWebSocket.fallbackAfterFailures,
-					reuseConnection: config.responsesWebSocket.reuseConnection,
-					transport: options?.transport ?? "auto",
-					onTransportState: (state: unknown) => transportStatus.observe(state, cacheOwner, statusGeneration),
-				}) } : {}),
-				onProviderStreamEvent: async (event, selectedModel) => {
-					try { transportStatus.providerEvent(event, cacheOwner, statusGeneration); } catch { /* Optional UI must not interrupt the stream. */ }
-					await options?.onProviderStreamEvent?.(event, selectedModel);
-				},
 				onPayload: async (payload, selectedModel) => {
 					const transformed = await options?.onPayload?.(payload, selectedModel) ?? payload;
 					options?.signal?.throwIfAborted();
@@ -164,21 +130,7 @@ export default async function (pi: ExtensionAPI) {
 					return transformed;
 				},
 			});
-			// Cache Pi's exact next-turn replay, including normalized tool IDs/arguments.
-			void stream.result().then((message) => {
-				transportStatus.result(message, cacheOwner, statusGeneration);
-				if (!useWebSocket || !replay || !message.responseId || !["stop", "toolUse"].includes(message.stopReason)) return;
-				const supportsGrammarTools = model.compat && "supportsOpenAIGrammarTools" in model.compat
-					? model.compat.supportsOpenAIGrammarTools ?? false : false;
-				const grammarToolInputProperties = replay.createGrammarToolInputProperties(replay.getDeclaredTools(context.messages), supportsGrammarTools);
-				const replayItems = replay.convertResponsesMessages(
-					model, { messages: [message] }, new Set(["openai", "openai-codex", "opencode"]),
-					{ includeSystemPrompt: false, grammarToolInputProperties },
-				).filter((item: { type: string }) => !["function_call_output", "custom_tool_call_output"].includes(item.type));
-				transport!.rememberResponse(message.responseId, replayItems, cacheOwner);
-			}).catch(() => { /* Optional cache preparation: use full history next turn. */ });
-			return stream;
 		},
 	});
-	pi.on("session_shutdown", () => { transport?.close(); compaction.reset(); transportStatus.clear(); });
+	pi.on("session_shutdown", () => { compaction.reset(); });
 }

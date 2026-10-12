@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Remove the Responses WebSocket transport, connection reuse/continuation helpers, fallback tracking, transport status and related regression suites.
+- Remove `ws` and `@types/ws` as direct dependencies.
+- Remove `defaults.responsesWebSocket`; existing configurations must delete that section before upgrading.
+- Preserve image generation and V2 remote compaction, delegating Responses requests and caller instrumentation to Pi.
+- Keep checkpoint persistence, recursive compaction and replay safety coverage through offline HTTP/SSE integration tests.
+
 ## 0.1.2
 
 - Normalize temporary WebSocket transport failures for Pi-managed retries; keep sent requests from being replayed inside fetch.

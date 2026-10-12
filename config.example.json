@@ -1,14 +1,6 @@
 {
   "schemaVersion": 2,
   "defaults": {
-    "responsesWebSocket": {
-      "enabled": false,
-      "providers": [],
-      "cachedContext": true,
-      "fallbackAfterFailures": 2,
-      "reuseConnection": true,
-      "slowResponseWarningMs": 30000
-    },
     "remoteCompaction": {
       "enabled": false,
       "models": [],

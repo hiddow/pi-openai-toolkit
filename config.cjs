@@ -3,7 +3,6 @@ const { readFileSync, statSync } = require('node:fs');
 const { isAbsolute, join, resolve } = require('node:path');
 
 const DEFAULTS = {
-  responsesWebSocket: { enabled: false, providers: [], cachedContext: true, fallbackAfterFailures: 2, reuseConnection: true, slowResponseWarningMs: 30_000 },
   remoteCompaction: { enabled: false, models: [], timeoutMs: 120_000 },
   imageGeneration: {
     enabled: false,
@@ -28,19 +27,14 @@ function parseConfig(value) {
     for (const field of Object.keys(section)) if (!Object.hasOwn(DEFAULTS[key], field)) throw new Error(`Unsupported Toolkit ${key} field: ${field}`);
     Object.assign(result[key], section);
   }
-  const ws = result.responsesWebSocket;
   const images = result.imageGeneration;
   const compaction = result.remoteCompaction;
-  for (const section of [ws, images, compaction]) if (typeof section.enabled !== 'boolean') throw new Error('Toolkit enabled must be boolean.');
-  if (typeof ws.cachedContext !== 'boolean' || typeof ws.reuseConnection !== 'boolean') throw new Error('Toolkit cachedContext and reuseConnection must be boolean.');
-  if (!Number.isSafeInteger(ws.fallbackAfterFailures) || ws.fallbackAfterFailures < 0 || ws.fallbackAfterFailures > 10) throw new Error('Toolkit fallbackAfterFailures must be 0–10 (0 disables sticky fallback).');
-  if (!Number.isSafeInteger(ws.slowResponseWarningMs) || ws.slowResponseWarningMs < 1000 || ws.slowResponseWarningMs > 3_600_000) throw new Error('Toolkit slowResponseWarningMs must be 1000–3600000.');
-  for (const list of [ws.providers, images.allowedModels, compaction.models]) {
+  for (const section of [images, compaction]) if (typeof section.enabled !== 'boolean') throw new Error('Toolkit enabled must be boolean.');
+  for (const list of [images.allowedModels, compaction.models]) {
     if (!Array.isArray(list) || !list.every(item => typeof item === 'string' && item.trim() === item && item.length > 0 && item.length <= 256)) {
-      throw new Error('Toolkit providers and allowedModels must be arrays of model/provider IDs.');
+      throw new Error('Toolkit models and allowedModels must be arrays of model IDs.');
     }
   }
-  if (ws.enabled && !ws.providers.length) throw new Error('Enable WebSocket only after configuring a nonempty providers list.');
   if (compaction.enabled && !compaction.models.length) throw new Error('Enable remote compaction only after configuring a nonempty models list.');
   if (!compaction.models.every(key => /^[^/]+\/.+$/.test(key))) throw new Error('Remote compaction models must be exact provider/model IDs.');
   if (!Number.isSafeInteger(compaction.timeoutMs) || compaction.timeoutMs < 1000 || compaction.timeoutMs > 3_600_000) throw new Error('Remote compaction timeoutMs must be 1000–3600000.');

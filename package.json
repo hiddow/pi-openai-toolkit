@@ -1,11 +1,11 @@
 {
   "name": "pi-openai-bridge",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
-  "description": "Responses WebSocket transport, remote compaction and imagegen for Pi; independently maintained lightweight toolkit",
+  "description": "V2 remote compaction and imagegen for Pi; independently maintained lightweight toolkit",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -19,7 +19,6 @@
     "pi-package",
     "pi-extension",
     "openai",
-    "websocket",
     "image-generation"
   ],
   "type": "module",
@@ -44,9 +43,6 @@
     "check": "npm run typecheck && npm test",
     "prepublishOnly": "npm run check"
   },
-  "dependencies": {
-    "ws": "^8.21.0"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*"
@@ -55,7 +51,6 @@
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-coding-agent": "1.1.0",
     "@types/node": "^22.19.19",
-    "@types/ws": "^8.18.1",
     "typescript": "~5.9.3"
   },
   "engines": {

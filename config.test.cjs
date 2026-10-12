@@ -5,14 +5,13 @@ const { mkdir, mkdtemp, rm, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { parseConfig, loadConfigFile, resolveConfigPath } = require('./config.cjs');
-const { assertReplayVersion } = require('./pi-runtime.cjs');
 
 test('a missing default config disables optional features and has no personal provider', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-toolkit-config-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const config = loadConfigFile(join(cwd, 'missing.json'));
-  assert.equal(config.responsesWebSocket.enabled, false);
-  assert.deepEqual(config.responsesWebSocket.providers, []);
+  assert.equal(config.remoteCompaction.enabled, false);
+  assert.deepEqual(config.remoteCompaction.models, []);
   assert.equal(config.imageGeneration.enabled, false);
 });
 
@@ -34,15 +33,15 @@ test('agent-root config takes precedence over legacy config without merging thei
   const legacy = join(cwd, 'extensions/pi-openai-toolkit/config.json');
   const current = join(cwd, 'pi-openai-toolkit.json');
   await mkdir(join(cwd, 'extensions/pi-openai-toolkit'), { recursive: true });
-  await writeFile(legacy, JSON.stringify({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: true, providers: ['legacy-fixture'] } } }));
+  await writeFile(legacy, JSON.stringify({ schemaVersion: 2, defaults: { remoteCompaction: { enabled: true, models: ['legacy-fixture/model'] } } }));
   assert.equal(resolveConfigPath(cwd, {}), legacy);
-  assert.equal(loadConfigFile(resolveConfigPath(cwd, {})).responsesWebSocket.enabled, true);
+  assert.equal(loadConfigFile(resolveConfigPath(cwd, {})).remoteCompaction.enabled, true);
   await writeFile(current, JSON.stringify({ schemaVersion: 2, defaults: { imageGeneration: { enabled: true } } }));
   assert.equal(resolveConfigPath(cwd, {}), current);
   const config = loadConfigFile(resolveConfigPath(cwd, {}));
   assert.equal(config.imageGeneration.enabled, true);
-  assert.equal(config.responsesWebSocket.enabled, false);
-  assert.deepEqual(config.responsesWebSocket.providers, []);
+  assert.equal(config.remoteCompaction.enabled, false);
+  assert.deepEqual(config.remoteCompaction.models, []);
 });
 
 test('explicit overrides win even when both default locations exist, and missing overrides fail', async t => {
@@ -73,27 +72,9 @@ test('an invalid agent-root config fails rather than silently loading a valid le
   assert.throws(() => loadConfigFile(resolveConfigPath(cwd, {})), SyntaxError);
 });
 
-test('WebSocket requires a provider and cached context can be disabled independently', () => {
-  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: true } } }), /nonempty providers/);
-  const config = parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: true, providers: ['fixture'], cachedContext: false } } });
-  assert.equal(config.responsesWebSocket.cachedContext, false);
-  assert.equal(config.responsesWebSocket.fallbackAfterFailures, 2);
-  assert.equal(config.responsesWebSocket.reuseConnection, true);
-  assert.equal(config.responsesWebSocket.slowResponseWarningMs, 30_000);
-  assert.equal(config.imageGeneration.enabled, false);
-  for (const fallbackAfterFailures of [-1, 11, 1.5]) assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { fallbackAfterFailures } } }), /fallbackAfterFailures/);
-  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { reuseConnection: 'false' } } }), /boolean/);
-  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { slowResponseWarningMs: 0 } } }), /slowResponseWarningMs/);
-  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { cachedContext: 'false' } } }), /boolean/);
-});
-
 test('unknown and credential fields are rejected; image defaults must remain allowlisted', () => {
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: {}, apiKey: 'test-fixture-only' }), /Unsupported/);
+  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: false } } }), /Unsupported Toolkit defaults field: responsesWebSocket/);
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { imageGeneration: { allowedModels: [] } } }), /nonempty/);
   assert.throws(() => parseConfig(JSON.parse('{"schemaVersion":2,"defaults":{"__proto__":{}}}')), /Unsupported/);
-});
-
-test('cached replay rejects unverified Pi versions with an actionable full-history alternative', () => {
-  assert.doesNotThrow(() => assertReplayVersion('1.1.0'));
-  assert.throws(() => assertReplayVersion('1.2.0'), /cachedContext to false/);
 });

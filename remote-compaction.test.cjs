@@ -7,7 +7,6 @@ const { join, dirname } = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { findPackageJSON } = require('node:module');
 const { createServer } = require('node:http');
-const { WebSocketServer } = require('ws');
 const { createCompactionController, readCheckpoint, executeRemoteCompaction, MARKER_PREFIX } = require('./remote-compaction.cjs');
 const { parseConfig } = require('./config.cjs');
 const checkpoint = { type: 'compaction', id: 'cmp_fixture', encrypted_content: 'opaque-fixture-only', future_field: { retained: true } };
@@ -71,7 +70,7 @@ test('remote compaction configuration is opt-in and uses exact provider/model id
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { remoteCompaction: { timeoutMs: 0 } } }), /timeoutMs/);
 });
 
-test('real Pi persists/reopens/recompacts opaque prefixes, preserves full tool results and WS tools, and blocks sealed edits', async t => {
+test('real Pi persists/reopens/recompacts opaque prefixes, preserves full tool results and SSE tools, and blocks sealed edits', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'pi-remote-compaction-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const configPath = join(cwd, 'config.json');
@@ -79,13 +78,11 @@ test('real Pi persists/reopens/recompacts opaque prefixes, preserves full tool r
   process.env.PI_OPENAI_TOOLKIT_CONFIG = configPath;
   t.after(() => { if (previousConfig === undefined) delete process.env.PI_OPENAI_TOOLKIT_CONFIG; else process.env.PI_OPENAI_TOOLKIT_CONFIG = previousConfig; });
   await writeFile(configPath, JSON.stringify({ schemaVersion: 2, defaults: {
-    responsesWebSocket: { enabled: true, providers: ['fixture-provider'] },
     remoteCompaction: { enabled: true, models: ['fixture-provider/fixture-model'] },
   } }));
   const file = join(cwd, 'evidence.txt');
   await writeFile(file, 'A'.repeat(3000) + '\nCRITICAL_EVIDENCE_AT_END');
   const http = createServer();
-  const websocket = new WebSocketServer({ server: http });
   const requests = [];
   let generation = 0, responseId = 0, sendTool = true, failCompact = false;
   function eventsFor(payload) {
@@ -121,9 +118,8 @@ test('real Pi persists/reopens/recompacts opaque prefixes, preserves full tool r
     const events = eventsFor(JSON.parse(body));
     res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(events.map(eventFrame).join(''));
   });
-  websocket.on('connection', socket => socket.on('message', data => { for (const event of eventsFor(JSON.parse(data.toString()))) socket.send(JSON.stringify(event)); }));
   await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
-  t.after(async () => { for (const client of websocket.clients) client.terminate(); await new Promise(resolve => websocket.close(resolve)); await new Promise(resolve => http.close(resolve)); });
+  t.after(async () => { await new Promise(resolve => http.close(resolve)); });
   const baseUrl = `http://127.0.0.1:${http.address().port}/v1`;
   await writeFile(join(cwd, 'models.json'), JSON.stringify({ providers: {
     'fixture-provider': { api: 'openai-responses', baseUrl, apiKey: 'fixture-only', models: [{ id: 'fixture-model', reasoning: false, contextWindow: 100000, maxTokens: 1000 }, { id: 'other-model', reasoning: false }] },

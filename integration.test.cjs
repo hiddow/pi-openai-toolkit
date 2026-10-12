@@ -6,23 +6,22 @@ const { tmpdir } = require('node:os');
 const { dirname, join } = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { findPackageJSON } = require('node:module');
-const { WebSocketServer } = require('ws');
+const { createServer } = require('node:http');
 const { spawnSync } = require('node:child_process');
 
 // Exercise the installed Pi runtime without contacting a provider or using keys.
-test('Pi loads/reloads Toolkit, preserves provider metadata, streams cached WS and executes imagegen', async t => {
+test('Pi loads/reloads Toolkit, preserves provider metadata, delegates SSE and executes imagegen', async t => {
   const host = dirname(findPackageJSON('@earendil-works/pi-coding-agent', pathToFileURL(__filename)));
   const cwd = await mkdtemp(join(tmpdir(), 'pi-toolkit-integration-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const previousConfigPath = process.env.PI_OPENAI_TOOLKIT_CONFIG;
-  const restoreConfig = () => {
+  t.after(() => {
     if (previousConfigPath === undefined) delete process.env.PI_OPENAI_TOOLKIT_CONFIG;
     else process.env.PI_OPENAI_TOOLKIT_CONFIG = previousConfigPath;
-  };
-  t.after(restoreConfig);
+  });
   process.env.PI_OPENAI_TOOLKIT_CONFIG = join(cwd, 'config.json');
   await writeFile(process.env.PI_OPENAI_TOOLKIT_CONFIG, JSON.stringify({ schemaVersion: 2, defaults: {
-    responsesWebSocket: { enabled: true, providers: ['fixture-provider'] },
+    remoteCompaction: { enabled: true, models: ['fixture-provider/gpt-5.4'] },
     imageGeneration: { enabled: true },
   } }));
   const originalArgv = process.argv[1];
@@ -34,87 +33,60 @@ test('Pi loads/reloads Toolkit, preserves provider metadata, streams cached WS a
   const extension = loaded.extensions[0];
   const registration = loaded.runtime.pendingProviderRegistrations.find(item => item.name === 'fixture-provider');
   assert.ok(registration);
+  assert.equal(loaded.runtime.pendingProviderRegistrations.length, 1, 'only checkpoint providers are wrapped');
   for (const key of ['models', 'baseUrl', 'headers', 'apiKey']) assert.equal(registration.config[key], undefined);
   assert.ok(extension.tools.has('imagegen'));
   assert.ok(extension.commands.has('toolkit-config'));
   assert.equal(process.argv[1], originalArgv);
-  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
-  await new Promise(resolve => server.once('listening', resolve));
+  assert.equal(extension.handlers.has('before_agent_start'), false);
+  assert.equal(extension.handlers.has('agent_settled'), false);
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    assert.equal(request.url, '/v1/responses');
+    let body = ''; for await (const chunk of request) body += chunk;
+    requests.push(JSON.parse(body));
+    const id = `resp_${requests.length}`;
+    const item = { type: 'message', id: `msg_${requests.length}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'OK', annotations: [] }] };
+    const events = [
+      { type: 'response.created', response: { id } },
+      { type: 'response.output_item.added', output_index: 0, item: { ...item, content: [] } },
+      { type: 'response.output_text.delta', output_index: 0, delta: 'OK' },
+      { type: 'response.output_item.done', output_index: 0, item },
+      { type: 'response.completed', response: { id, status: 'completed', output: [item], usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 } } },
+    ];
+    response.writeHead(200, { 'content-type': 'text/event-stream', 'x-fixture': 'sse' });
+    response.end(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''));
+  });
+  server.on('upgrade', () => assert.fail('Toolkit must not initiate a WebSocket upgrade'));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => {
     for (const handler of extension.handlers.get('session_shutdown') ?? []) await handler({}, {});
     await new Promise(resolve => server.close(resolve));
   });
-  let connections = 0;
-  let disconnectResponses = false;
-  const requests = [];
-  server.on('connection', socket => {
-    connections++;
-    socket.on('message', data => {
-      requests.push(JSON.parse(data.toString()));
-      if (disconnectResponses) { socket.terminate(); return; }
-      const id = `resp_${requests.length}`;
-      const item = { type: 'message', id: `msg_${requests.length}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'OK', annotations: [] }] };
-      for (const event of [
-        { type: 'response.created', response: { id } },
-        { type: 'response.output_item.added', output_index: 0, item: { ...item, content: [] } },
-        { type: 'response.output_text.delta', output_index: 0, delta: 'OK' },
-        { type: 'response.output_item.done', output_index: 0, item },
-        { type: 'response.completed', response: { id, status: 'completed', output: [item], usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 } } },
-      ]) socket.send(JSON.stringify(event));
-    });
-  });
   const model = { id: 'gpt-5.4', name: 'Fixture', provider: 'fixture-provider', api: 'openai-responses', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
   const user = text => ({ role: 'user', content: [{ type: 'text', text }], timestamp: 0 });
-  let payloadHooks = 0;
+  let payloadHooks = 0, providerEvents = 0, fetchCalls = 0;
   const headers = [];
-  const options = { apiKey: 'integration-fixture-only', sessionId: 'integration', transport: 'auto', onPayload: () => { payloadHooks++; }, onResponse: value => { headers.push(value.headers); } };
+  const options = {
+    apiKey: 'integration-fixture-only', sessionId: 'integration', transport: 'auto',
+    onPayload: payload => { payloadHooks++; return { ...payload, metadata: { fixture: 'preserved' } }; },
+    onResponse: value => { headers.push(value.headers); },
+    onProviderStreamEvent: () => { providerEvents++; },
+    fetch: (...args) => { fetchCalls++; return globalThis.fetch(...args); },
+  };
   const first = await registration.config.streamSimple(model, { messages: [user('one')] }, options).result();
   assert.equal(first.stopReason, 'stop');
   assert.equal(first.content[0].text, 'OK');
   assert.equal(first.usage.totalTokens, 3);
   const second = await registration.config.streamSimple(model, { messages: [user('one'), first, user('two')] }, options).result();
   assert.equal(second.stopReason, 'stop');
-  assert.equal(connections, 1);
-  assert.equal(requests[1].previous_response_id, 'resp_1');
-  assert.equal(requests[1].input.length, 1);
+  assert.equal(requests[1].previous_response_id, undefined);
+  assert.ok(requests[1].input.length > requests[0].input.length, 'full history is delegated to Pi');
+  assert.deepEqual(requests[1].metadata, { fixture: 'preserved' });
   assert.equal(payloadHooks, 2);
-  assert.equal(headers[1]['x-pi-websocket-context'], 'delta');
-
-  // Exercise Pi's actual SDK parser and extension lifecycle on interrupted WS streams.
-  const statuses = [];
-  const notifications = [];
-  const diagnostics = [];
-  loaded.runtime.appendEntry = (customType, data) => diagnostics.push({ customType, data });
-  const ctx = { mode: 'tui', hasUI: true, ui: { setStatus: (_key, text) => statuses.push(text), notify: text => notifications.push(text) } };
-  for (const handler of extension.handlers.get('before_agent_start') ?? []) await handler({}, ctx);
-  disconnectResponses = true;
-  const { isRetryableAssistantError } = await import('@earendil-works/pi-ai/compat');
-  for (let i = 0; i < 2; i++) {
-    const failed = await registration.config.streamSimple(model, { messages: [user('resume')] }, options).result();
-    assert.equal(failed.stopReason, 'error');
-    assert.equal(isRetryableAssistantError(failed), true);
-  }
-  const websocketAttempts = requests.length;
-  let httpAttempts = 0;
-  const sseOptions = { ...options, fetch: async request => {
-    httpAttempts++;
-    const body = await request.json();
-    assert.equal(body.stream, true);
-    assert.equal(body.previous_response_id, undefined);
-    return new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { id: 'http_recovered', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 0, total_tokens: 1 } } })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
-  } };
-  for (let i = 0; i < 2; i++) {
-    const recovered = await registration.config.streamSimple(model, { messages: [user('resume')] }, sseOptions).result();
-    assert.equal(recovered.stopReason, 'stop');
-  }
-  assert.equal(httpAttempts, 2);
-  assert.equal(requests.length, websocketAttempts);
-  for (const handler of extension.handlers.get('agent_settled') ?? []) await handler({ aborted: false }, ctx);
-  assert.equal(statuses.at(-1), undefined);
-  assert.equal(notifications.length, 1);
-  assert.equal(diagnostics[0].customType, 'pi-openai-transport');
-  assert.equal(diagnostics[0].data.outcome, 'stop');
-  assert.doesNotMatch(JSON.stringify(diagnostics), /integration-fixture-only|Bearer|127\.0\.0\.1/);
+  assert.equal(providerEvents, 10);
+  assert.equal(fetchCalls, 2);
+  assert.equal(headers[1]['x-fixture'], 'sse');
 
   const previousFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = previousFetch; });
@@ -147,13 +119,13 @@ test('Pi loads/reloads Toolkit, preserves provider metadata, streams cached WS a
   assert.deepEqual(disabled.runtime.pendingProviderRegistrations, []);
 });
 
-test('bundled Node CLI resolves cached replay through the host package directory', async t => {
+test('bundled Node CLI loads Toolkit without transport helpers', async t => {
   const host = dirname(findPackageJSON('@earendil-works/pi-coding-agent', pathToFileURL(__filename)));
   const cwd = await mkdtemp(join(tmpdir(), 'pi-toolkit-cli-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const configPath = join(cwd, 'pi-openai-toolkit.json');
   await writeFile(configPath, JSON.stringify({ schemaVersion: 2, defaults: {
-    responsesWebSocket: { enabled: true, providers: ['fixture-provider'] },
+    remoteCompaction: { enabled: true, models: ['fixture-provider/fixture-model'] },
     imageGeneration: { enabled: true },
   } }));
   await writeFile(join(cwd, 'models.json'), JSON.stringify({ providers: {

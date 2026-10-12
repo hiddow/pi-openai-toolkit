@@ -121,7 +121,7 @@ test('header precedence, explicit removals and endpoint validation preserve rout
 
 test('Toolkit config validates allowlists and rejects unsupported upstream features', () => {
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { imageGeneration: { defaultModel: 'other' } } }), /included/);
-  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: 'true' } } }), /boolean/);
+  assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { imageGeneration: { enabled: 'true' } } }), /boolean/);
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { context: { mode: 'remote-compaction' } } }), /Unsupported/);
   assert.throws(() => parseConfig({ schemaVersion: 2, defaults: { imageGeneration: { timeoutMs: 0 } } }), /timeoutMs/);
 });
